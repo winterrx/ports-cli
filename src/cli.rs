@@ -27,6 +27,7 @@ pub fn run(program: &str, raw_args: Vec<String>) -> Result<()> {
         Command::Ps => show_processes(args.show_all),
         Command::Clean => clean_orphaned(),
         Command::Kill { force, targets } => kill_targets(force, &targets),
+        Command::KillAll { force, yes } => kill_all_ports(args.show_all, force, yes),
         Command::Watch => watch_ports(args.show_all),
         Command::Help => {
             print_help();
@@ -41,6 +42,7 @@ enum Command {
     Ps,
     Clean,
     Kill { force: bool, targets: Vec<String> },
+    KillAll { force: bool, yes: bool },
     Watch,
     Help,
 }
@@ -83,14 +85,33 @@ impl ParsedArgs {
             Some("ps") => Command::Ps,
             Some("clean") => Command::Clean,
             Some("watch") => Command::Watch,
+            Some("kill-all" | "killall") => {
+                let force = has_flag(&filtered[1..], "-f", "--force");
+                let yes = has_flag(&filtered[1..], "-y", "--yes");
+                ensure_only_flags(
+                    &filtered[1..],
+                    "Usage: ports kill-all [-f|--force] [-y|--yes] [--all]",
+                )?;
+                Command::KillAll { force, yes }
+            }
             Some("kill") => {
-                let force = filtered.iter().any(|arg| arg == "-f" || arg == "--force");
+                let force = has_flag(&filtered[1..], "-f", "--force");
+                let yes = has_flag(&filtered[1..], "-y", "--yes");
                 let targets = filtered
                     .iter()
                     .skip(1)
-                    .filter(|arg| *arg != "-f" && *arg != "--force")
+                    .filter(|arg| !is_kill_flag(arg))
                     .cloned()
                     .collect::<Vec<_>>();
+                if targets.len() == 1 && targets[0] == "all" {
+                    return Ok(Self {
+                        show_all,
+                        command: Command::KillAll { force, yes },
+                    });
+                }
+                if targets.iter().any(|target| target == "all") {
+                    bail!("Usage: ports kill all [-f|--force] [-y|--yes] [--all]");
+                }
                 if targets.is_empty() {
                     bail!("Usage: ports kill [-f|--force] <port|pid> [port|pid...]");
                 }
@@ -230,6 +251,80 @@ fn kill_targets(force: bool, targets: &[String]) -> Result<()> {
     Ok(())
 }
 
+fn kill_all_ports(show_all: bool, force: bool, yes: bool) -> Result<()> {
+    let ports = get_listening_ports(false)?;
+    let ports = if show_all {
+        ports
+    } else {
+        filtered_ports(ports)
+    };
+
+    if ports.is_empty() {
+        println!();
+        println!(
+            "  No {}listening ports found.",
+            if show_all { "" } else { "dev " }
+        );
+        println!();
+        return Ok(());
+    }
+
+    let mut targets = Vec::<PortInfo>::new();
+    for port in ports {
+        if !targets.iter().any(|target| target.pid == port.pid) {
+            targets.push(port);
+        }
+    }
+
+    if !yes {
+        if !interactive() {
+            bail!("refusing to kill all ports without --yes in non-interactive mode");
+        }
+
+        let should_kill = Confirm::new()
+            .with_prompt(format!(
+                "Kill {} {}listening process{}?",
+                targets.len(),
+                if show_all { "" } else { "dev " },
+                if targets.len() == 1 { "" } else { "es" }
+            ))
+            .default(false)
+            .interact()?;
+
+        if !should_kill {
+            println!();
+            println!("  No processes killed.");
+            println!();
+            return Ok(());
+        }
+    }
+
+    let mut failed = Vec::new();
+    println!();
+    for target in &targets {
+        println!(
+            "  Killing :{} (PID {}, {})",
+            target.port, target.pid, target.process_name
+        );
+        if kill_process(target.pid, force) {
+            println!(
+                "  Sent {} to PID {}",
+                if force { "SIGKILL" } else { "SIGTERM" },
+                target.pid
+            );
+        } else {
+            println!("  Failed to kill PID {}", target.pid);
+            failed.push(target.pid);
+        }
+    }
+
+    println!();
+    if !failed.is_empty() {
+        bail!("failed to kill {} process(es)", failed.len());
+    }
+    Ok(())
+}
+
 fn watch_ports(show_all: bool) -> Result<()> {
     display_watch_header();
     let running = Arc::new(AtomicBool::new(true));
@@ -280,6 +375,8 @@ fn print_help() {
     println!("    ports ps           Show all running dev processes");
     println!("    ports <number>     Detailed info about a specific port");
     println!("    ports kill <n>     Kill by port or PID (-f for force)");
+    println!("    ports kill all     Kill every shown listening process");
+    println!("    ports kill-all     Same as ports kill all (-y to skip prompt)");
     println!("    ports clean        Kill orphaned/zombie dev servers");
     println!("    ports watch        Monitor port changes in real time");
     println!("    whoisonport <num>  Alias for ports <number>");
@@ -298,4 +395,19 @@ fn parse_port(value: &str) -> Result<u16> {
 
 fn interactive() -> bool {
     std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
+}
+
+fn has_flag(args: &[String], short: &str, long: &str) -> bool {
+    args.iter().any(|arg| arg == short || arg == long)
+}
+
+fn is_kill_flag(arg: &str) -> bool {
+    matches!(arg, "-f" | "--force" | "-y" | "--yes")
+}
+
+fn ensure_only_flags(args: &[String], usage: &str) -> Result<()> {
+    if args.iter().any(|arg| !is_kill_flag(arg)) {
+        bail!("{usage}");
+    }
+    Ok(())
 }

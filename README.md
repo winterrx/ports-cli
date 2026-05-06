@@ -17,6 +17,8 @@ ports ps
 ports 3000
 whoisonport 3000
 ports kill 3000
+ports kill all
+ports kill-all --yes
 ports watch
 ```
 
@@ -43,4 +45,6 @@ $ ports
 - `ports` shows the common dev-facing view.
 - `ports --all` shows all listening ports.
 - `ports ps` shows active dev processes.
+- `ports kill all` kills every shown dev listener after confirmation.
+- `ports kill-all --yes` skips the prompt; add `--all` to include every listener.
 - `whoisonport <port>` is a shortcut for detailed lookup.
